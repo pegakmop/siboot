@@ -1,0 +1,74 @@
+
+name: Build siboot
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'minis/**'
+      - '!minis/bin/**'
+      - '!minis/install.sh'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            perl \
+            clang \
+            musl-tools \
+            linux-libc-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: aarch64-unknown-linux-musl
+
+      - name: Build siboot
+        working-directory: minis
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static -C relocation-model=static"
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          cargo build --release --locked \
+            --target aarch64-unknown-linux-musl
+
+      - name: Put the binary in the repo and update install.sh
+        run: |
+          BIN=minis/target/aarch64-unknown-linux-musl/release/siboot
+          cp "$BIN" minis/bin/siboot-aarch64
+          SHA=$(sha256sum minis/bin/siboot-aarch64 | cut -d ' ' -f 1)
+          SIZE=$(stat -c %s minis/bin/siboot-aarch64)
+          sed -i "s/^SHA256=.*/SHA256=\"$SHA\"/; s/^SIZE=.*/SIZE=$SIZE/" minis/install.sh
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add minis/bin/siboot-aarch64 minis/install.sh
+          if git diff --cached --quiet; then
+            echo "Nothing changed"
+          else
+            git commit -m "Build: update siboot-aarch64, SHA256 and SIZE [skip ci]"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: siboot-aarch64
+          path: minis/target/aarch64-unknown-linux-musl/release/siboot
