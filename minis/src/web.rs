@@ -45,6 +45,8 @@ const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'un
 /// A request's line and headers are never longer, nor a POST's body.
 const MAX_HEAD: usize = 8 * 1024;
 const MAX_BODY: usize = 4 * 1024;
+/// IPA uploads are sent in bounded chunks, so the server never buffers a whole IPA.
+const MAX_UPLOAD_CHUNK: usize = 512 * 1024;
 /// Connections at once. The page keeps one open and makes one for each
 /// answer; a reload or two more is plenty.
 const MAX_CONNECTIONS: usize = 16;
@@ -195,6 +197,15 @@ pub enum Code {
     /// Other ways to get the code.
     More,
     Cancel,
+}
+
+/// The IPA source selected in the web page.
+#[derive(Debug, PartialEq, Eq)]
+pub enum IpaChoice {
+    /// Use the usual latest SideInstaller release.
+    SideInstaller,
+    /// A local path, uploaded file, or URL.
+    Source(String),
 }
 
 impl Server {
@@ -348,6 +359,32 @@ impl Server {
             "kind": "ready", "question": title, "steps": steps, "notes": notes, "button": button,
         }));
         answer["go"] == json!(true)
+    }
+
+    /// Ask which IPA to sign: the default release, a file from Files, a path
+    /// already in Minis, or a direct URL.
+    pub fn choose_ipa(&self) -> Option<IpaChoice> {
+        let answer = self.ask(json!({
+            "kind": "ipa",
+            "question": "Choose an IPA to sign and install",
+        }));
+        if cancelled(&answer) {
+            return None;
+        }
+        if answer["default"] == json!(true) {
+            return Some(IpaChoice::SideInstaller);
+        }
+        if let Some(source) = answer["source"].as_str().filter(|s| !s.trim().is_empty()) {
+            return Some(IpaChoice::Source(source.trim().to_string()));
+        }
+        if answer["uploaded"] == json!(true) {
+            let id = answer["id"].as_u64()?;
+            let path = uploaded_ipa_path(&self.shared, id);
+            if std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0) {
+                return Some(IpaChoice::Source(path.to_string_lossy().into_owned()));
+            }
+        }
+        None
     }
 
     /// One of `options`, by index. None when the page backs out.
@@ -558,7 +595,12 @@ fn read_request(stream: &TcpStream) -> Result<Request, u16> {
     };
     if let Some(length) = request.header("content-length") {
         let length: usize = length.parse().map_err(|_| 400u16)?;
-        if length > MAX_BODY {
+        let limit = if request.method == "POST" && request.target.ends_with("/upload") {
+            MAX_UPLOAD_CHUNK
+        } else {
+            MAX_BODY
+        };
+        if length > limit {
             return Err(413);
         }
         let mut body = vec![0; length];
@@ -606,8 +648,9 @@ fn handle(shared: &Shared, stream: TcpStream) -> io::Result<()> {
         ),
         ("GET", "/events") => events(shared, &stream, &request),
         ("POST", "/answer") => answer(shared, &stream, &request),
+        ("POST", "/upload") => upload(shared, &stream, &request),
         ("POST", "/stop") => stop(shared, &stream, &request),
-        (_, "" | "/" | "/events" | "/answer" | "/stop") => refuse(&stream, 405),
+        (_, "" | "/" | "/events" | "/answer" | "/upload" | "/stop") => refuse(&stream, 405),
         _ => refuse(&stream, 404),
     }
 }
@@ -651,6 +694,53 @@ fn answer(shared: &Shared, stream: &TcpStream, request: &Request) -> io::Result<
     };
     // 409: answered already, or not asked.
     respond(stream, if taken { 204 } else { 409 }, &[], b"")
+}
+
+/// A private temporary path for one upload question. The unpredictable page
+/// key prevents another local app from guessing the file name.
+fn uploaded_ipa_path(shared: &Shared, id: u64) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("siboot-{}-{id}.ipa", shared.key))
+}
+
+/// Receive one bounded chunk of the IPA selected by the page. Chunks are
+/// appended in order; the browser sends the final answer only after all arrive.
+fn upload(shared: &Shared, stream: &TcpStream, request: &Request) -> io::Result<()> {
+    if let Some(origin) = request.header("origin") {
+        if !shared.is_own_origin(origin) {
+            return refuse(stream, 403);
+        }
+    }
+    let binary = request.header("content-type").is_some_and(|t| {
+        t.trim().eq_ignore_ascii_case("application/octet-stream")
+    });
+    if !binary || request.body.is_empty() {
+        return refuse(stream, 415);
+    }
+    let Some(id) = request.header("x-upload-id").and_then(|v| v.parse::<u64>().ok()) else {
+        return refuse(stream, 400);
+    };
+    let Some(offset) = request.header("x-upload-offset").and_then(|v| v.parse::<u64>().ok()) else {
+        return refuse(stream, 400);
+    };
+    if shared.lock().asking != Some(id) {
+        return refuse(stream, 409);
+    }
+    let path = uploaded_ipa_path(shared, id);
+    let mut file = match if offset == 0 {
+        std::fs::File::create(&path)
+    } else {
+        match std::fs::OpenOptions::new().append(true).open(&path) {
+            Ok(file) if file.metadata().is_ok_and(|m| m.len() == offset) => Ok(file),
+            Ok(_) | Err(_) => return refuse(stream, 409),
+        }
+    } {
+        Ok(file) => file,
+        Err(_) => return refuse(stream, 500),
+    };
+    if file.write_all(&request.body).is_err() {
+        return refuse(stream, 500);
+    }
+    respond(stream, 204, &[], b"")
 }
 
 fn stop(shared: &Shared, stream: &TcpStream, request: &Request) -> io::Result<()> {

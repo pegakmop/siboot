@@ -462,6 +462,77 @@ footer{display:flex; align-items:center; justify-content:space-between; gap:12px
       };
       actions.append(button("Continue", "primary", "submit"));
       actions.append(button("Cancel", "quiet", "button", () => send({ cancel: true })));
+    } else if (e.kind === "ipa") {
+      const fileField = make("label", "field");
+      fileField.append(make("span", "field-label", "Choose from Files"));
+      const file = make("input", "input");
+      file.type = "file";
+      file.accept = ".ipa,application/octet-stream";
+      fileField.append(file);
+      askEl.append(fileField);
+
+      const pathField = make("label", "field");
+      pathField.append(make("span", "field-label", "Path in Minis"));
+      const pathInput = make("input", "input");
+      pathInput.type = "text";
+      pathInput.autocomplete = "off";
+      pathInput.autocapitalize = "off";
+      pathInput.placeholder = "/root/AppsManager_iOS27.ipa";
+      pathField.append(pathInput);
+      askEl.append(pathField);
+
+      const urlField = make("label", "field");
+      urlField.append(make("span", "field-label", "Direct IPA URL"));
+      const urlInput = make("input", "input");
+      urlInput.type = "url";
+      urlInput.autocomplete = "url";
+      urlInput.autocapitalize = "off";
+      urlInput.placeholder = "https://example.com/app.ipa";
+      urlField.append(urlInput);
+      askEl.append(urlField);
+
+      actions.append(button("Use SideInstaller", "secondary", "button", () => send({ default: true })));
+      actions.append(button("Sign selected file", "primary", "button", async () => {
+        const selected = file.files && file.files[0];
+        if (!selected) return file.click();
+        if (!selected.name.toLowerCase().endsWith(".ipa")) {
+          banner("Choose a file with the .ipa extension.", "warn");
+          return;
+        }
+        const id = asking.id;
+        busy(true);
+        try {
+          const chunkSize = 512 * 1024;
+          for (let offset = 0; offset < selected.size; offset += chunkSize) {
+            const reply = await fetch("upload", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/octet-stream",
+                "X-Upload-Id": String(id),
+                "X-Upload-Offset": String(offset),
+              },
+              body: selected.slice(offset, Math.min(offset + chunkSize, selected.size)),
+              cache: "no-store",
+            });
+            if (!reply.ok) throw new Error("Upload failed: " + reply.status);
+          }
+          busy(false);
+          await send({ uploaded: true });
+        } catch (err) {
+          busy(false);
+          banner("Couldn't upload the IPA. Check the connection and try again.", "warn");
+        }
+      }));
+      actions.append(button("Use Minis path", "secondary", "button", () => {
+        if (!pathInput.value.trim()) return pathInput.focus();
+        send({ source: pathInput.value.trim() });
+      }));
+      actions.append(button("Download from URL", "secondary", "button", () => {
+        if (!urlInput.value.trim()) return urlInput.focus();
+        send({ source: urlInput.value.trim() });
+      }));
+      actions.append(button("Cancel", "quiet", "button", () => send({ cancel: true })));
+      focus = pathInput;
     } else if (e.kind === "code") {
       const code = make("label", "code");
       const boxes = make("span", "boxes");

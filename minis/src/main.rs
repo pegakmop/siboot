@@ -539,8 +539,21 @@ async fn pipeline(args: &Args) -> Result<()> {
     let mut session = account::sign_in(args).await?;
     ui::done(&session.team);
 
-    ui::step(5, "Signing SideInstaller for this iPhone");
-    let ipa = sign::fetch_ipa(args).await?;
+    ui::step(5, "Signing the selected app for this iPhone");
+    let ipa_source = if args.ipa.is_none() {
+        match web::page().map(web::Server::choose_ipa) {
+            Some(Some(web::IpaChoice::Source(source))) => Some(source),
+            Some(Some(web::IpaChoice::SideInstaller)) | None => None,
+            Some(None) => return Err(Fail::by_user("IPA selection was cancelled.")),
+        }
+    } else {
+        args.ipa.clone()
+    };
+    let signing_args = Args {
+        ipa: ipa_source,
+        ..args.clone()
+    };
+    let ipa = sign::fetch_ipa(&signing_args).await?;
     let signed = sign::sign(&mut session, &ipa, &device).await?;
     ui::done(&match &signed.version {
         Some(version) => format!("{} {version} signed", signed.name),
