@@ -46,7 +46,7 @@ jobs:
           CC_aarch64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: |
-          cargo build --release --locked \
+          cargo build --release \
             --target aarch64-unknown-linux-musl
 
       - name: Put the binary in the repo and update install.sh
