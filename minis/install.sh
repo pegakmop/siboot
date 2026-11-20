@@ -14,7 +14,7 @@ BASE="${SIBOOT_BASE:-https://raw.githubusercontent.com/pegakmop/siboot/main/mini
 # Of bin/siboot-aarch64, updated with it: a download that doesn't match (an
 # error page, a cut-off transfer) is never run. SIZE only draws the progress
 # bar.
-SHA256="622958845c414587e25362990fc5b7648d43d8f7ce3dd747c9056cea5e7317b7"
+SHA256="189edbc8e608f5a79a1c9c0477a65a5d0025d009ca7ba515c2429cda5d43f1f9"
 SIZE=12143448
 
 DIR="$HOME/.siboot/bin"
