@@ -363,7 +363,7 @@ impl Server {
 
     /// Ask which IPA to sign: the default release, a file from Files, a path
     /// already in Minis, or a direct URL.
-    pub fn choose_ipa(&self) -> Option<IpaChoice> {
+    pub fn choose_ipa(&self) -> Option<(IpaChoice, bool)> {
         let answer = self.ask(json!({
             "kind": "ipa",
             "question": "Choose an IPA to sign and install",
@@ -371,17 +371,19 @@ impl Server {
         if cancelled(&answer) {
             return None;
         }
+        // The page's "Install without Wi-Fi" box (cellular.rs).
+        let data_off = answer["data_off"] == json!(true);
         if answer["default"] == json!(true) {
-            return Some(IpaChoice::SideInstaller);
+            return Some((IpaChoice::SideInstaller, data_off));
         }
         if let Some(source) = answer["source"].as_str().filter(|s| !s.trim().is_empty()) {
-            return Some(IpaChoice::Source(source.trim().to_string()));
+            return Some((IpaChoice::Source(source.trim().to_string()), data_off));
         }
         if answer["uploaded"] == json!(true) {
             let id = answer["id"].as_u64()?;
             let path = uploaded_ipa_path(&self.shared, id);
             if std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0) {
-                return Some(IpaChoice::Source(path.to_string_lossy().into_owned()));
+                return Some((IpaChoice::Source(path.to_string_lossy().into_owned()), data_off));
             }
         }
         None

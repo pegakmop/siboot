@@ -26,6 +26,7 @@
 
 mod account;
 mod bridge;
+mod cellular;
 mod devmode;
 mod fail;
 #[cfg(test)]
@@ -107,6 +108,8 @@ pub struct Args {
     pub apple_id: Option<String>,
     pub ipa: Option<String>,
     pub anisette: Option<String>,
+    /// Mobile data off while installing (`--data-off`), see cellular.rs.
+    pub data_off: bool,
 }
 
 impl Args {
@@ -141,6 +144,7 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> std::result::Result<Par
         apple_id: None,
         ipa: None,
         anisette: None,
+        data_off: false,
     };
     let mut argv = argv.into_iter();
     let mut command_seen = false;
@@ -171,6 +175,7 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> std::result::Result<Par
             "--ipa" => args.ipa = Some(value("--ipa")?),
             "--anisette" => args.anisette = Some(value("--anisette")?),
             "--turn-on" => args.turn_on = true,
+            "--data-off" => args.data_off = true,
             "check" | "connect" | "developer-mode" if !command_seen => {
                 command_seen = true;
                 args.command = match arg.as_str() {
@@ -238,6 +243,10 @@ Open Minis, with your own Apple Account.
       latest release.
   {anisette}
       Sign in through this anisette server only.
+  {data_off}
+      Turn mobile data off for the install, with
+      the TurnOffData and TurnOnData Shortcuts,
+      so it needs no Wi-Fi. Signing still does.
   {turn_on}
       With developer-mode: turn it on, not only
       show it.
@@ -284,6 +293,7 @@ Open Minis, with your own Apple Account.
         apple_id = flag("--apple-id EMAIL"),
         ipa = flag("--ipa PATH|URL"),
         anisette = flag("--anisette URL"),
+        data_off = flag("--data-off"),
         turn_on = flag("--turn-on"),
         device_ip = flag("--device-ip IP"),
         port = flag("--port N"),
@@ -540,10 +550,18 @@ async fn pipeline(args: &Args) -> Result<()> {
     ui::done(&session.team);
 
     ui::step(5, "Signing the selected app for this iPhone");
+    let mut data_off = args.data_off;
     let ipa_source = if args.ipa.is_none() {
         match web::page().map(web::Server::choose_ipa) {
-            Some(Some(web::IpaChoice::Source(source))) => Some(source),
-            Some(Some(web::IpaChoice::SideInstaller)) | None => None,
+            Some(Some((web::IpaChoice::Source(source), off))) => {
+                data_off |= off;
+                Some(source)
+            }
+            Some(Some((web::IpaChoice::SideInstaller, off))) => {
+                data_off |= off;
+                None
+            }
+            None => None,
             Some(None) => return Err(Fail::by_user("IPA selection was cancelled.")),
         }
     } else {
@@ -561,6 +579,11 @@ async fn pipeline(args: &Args) -> Result<()> {
     });
 
     ui::step(6, "Installing it");
+    // Data comes back when `_data` drops: after step 7, or on any error.
+    let _data = cellular::DataOff::start(data_off).await;
+    if data_off && !cellular::wait_for(args.device, std::time::Duration::from_secs(20)).await {
+        ui::detail("the iPhone's pairing port did not answer yet, trying anyway");
+    }
     let mut connection = tunnel::open(args.device, &pairing_path).await?;
     let uploaded = install::install(&mut connection, &signed.app_dir).await?;
     ui::ok(&format!("{} installed ({})", signed.name, signed.bundle_id));

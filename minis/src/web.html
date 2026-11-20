@@ -93,6 +93,8 @@ body:not(.details) .step[data-state=done] .item.ok{display:none}
 .ask[aria-busy=true]{opacity:.55; pointer-events:none}
 .ask-title{font-size:17px; font-weight:600; line-height:1.3}
 .field{display:block; margin-top:14px}
+.check { display: flex; gap: 10px; align-items: center; margin: 4px 0 14px; font-size: 0.95rem; opacity: 0.9; }
+.check input { width: 20px; height: 20px; flex: none; }
 .field-label{display:block; margin-bottom:6px; font-size:13px; color:var(--muted)}
 .input{width:100%; height:48px; padding:0 14px; border:1px solid var(--hairline-strong); border-radius:var(--r-control); background:var(--raised); font-size:17px; outline:none; -webkit-appearance:none; appearance:none}
 .input:focus{border-color:var(--accent)}
@@ -491,7 +493,14 @@ footer{display:flex; align-items:center; justify-content:space-between; gap:12px
       urlField.append(urlInput);
       askEl.append(urlField);
 
-      actions.append(button("Use SideInstaller", "secondary", "button", () => send({ default: true })));
+      const dataField = make("label", "check");
+      const dataOff = make("input");
+      dataOff.type = "checkbox";
+      dataField.append(dataOff, make("span", "", "Install without Wi-Fi (turn mobile data off for the install)"));
+      askEl.append(dataField);
+      const extra = () => ({ data_off: dataOff.checked });
+
+      actions.append(button("Use SideInstaller", "secondary", "button", () => send({ default: true, ...extra() })));
       actions.append(button("Sign selected file", "primary", "button", async () => {
         const selected = file.files && file.files[0];
         if (!selected) return file.click();
@@ -517,7 +526,7 @@ footer{display:flex; align-items:center; justify-content:space-between; gap:12px
             if (!reply.ok) throw new Error("Upload failed: " + reply.status);
           }
           busy(false);
-          await send({ uploaded: true });
+          await send({ uploaded: true, ...extra() });
         } catch (err) {
           busy(false);
           banner("Couldn't upload the IPA. Check the connection and try again.", "warn");
@@ -525,11 +534,11 @@ footer{display:flex; align-items:center; justify-content:space-between; gap:12px
       }));
       actions.append(button("Use Minis path", "secondary", "button", () => {
         if (!pathInput.value.trim()) return pathInput.focus();
-        send({ source: pathInput.value.trim() });
+        send({ source: pathInput.value.trim(), ...extra() });
       }));
       actions.append(button("Download from URL", "secondary", "button", () => {
         if (!urlInput.value.trim()) return urlInput.focus();
-        send({ source: urlInput.value.trim() });
+        send({ source: urlInput.value.trim(), ...extra() });
       }));
       actions.append(button("Cancel", "quiet", "button", () => send({ cancel: true })));
       focus = pathInput;
