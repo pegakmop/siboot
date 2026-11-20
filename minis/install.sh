@@ -5,17 +5,17 @@
 #
 # In Minis's terminal (Minis › Settings › Terminal):
 #
-#   wget -qO- https://raw.githubusercontent.com/FrizzleM/siboot/main/minis/install.sh | sh
+#   wget -qO- https://raw.githubusercontent.com/pegakmop/siboot/main/minis/install.sh | sh
 #
 # Afterwards `siboot` runs it again, without downloading.
 set -eu
 
-BASE="${SIBOOT_BASE:-https://raw.githubusercontent.com/FrizzleM/siboot/main/minis}"
+BASE="${SIBOOT_BASE:-https://raw.githubusercontent.com/pegakmop/siboot/main/minis}"
 # Of bin/siboot-aarch64, updated with it: a download that doesn't match (an
 # error page, a cut-off transfer) is never run. SIZE only draws the progress
 # bar.
-SHA256="b33f14a00b94ae8a8f133f43bcd0300b7080cc816996d489a695d0731ab531c9"
-SIZE=12209056
+SHA256="622958845c414587e25362990fc5b7648d43d8f7ce3dd747c9056cea5e7317b7"
+SIZE=12143448
 
 DIR="$HOME/.siboot/bin"
 BIN="$DIR/siboot"
