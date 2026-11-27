@@ -92,6 +92,8 @@ body:not(.details) .step[data-state=done] .item.ok{display:none}
 .ask{margin:14px 0 4px; padding:18px; border:1px solid var(--hairline); border-radius:var(--r-card); background:var(--card); transition:opacity var(--fast) var(--ease)}
 .ask[aria-busy=true]{opacity:.55; pointer-events:none}
 .ask-title{font-size:17px; font-weight:600; line-height:1.3}
+.check { display: flex; gap: 10px; align-items: center; margin: 4px 0 14px; font-size: 0.95rem; opacity: 0.9; }
+.check input { width: 20px; height: 20px; flex: none; }
 .field{display:block; margin-top:14px}
 .field-label{display:block; margin-bottom:6px; font-size:13px; color:var(--muted)}
 .input{width:100%; height:48px; padding:0 14px; border:1px solid var(--hairline-strong); border-radius:var(--r-control); background:var(--raised); font-size:17px; outline:none; -webkit-appearance:none; appearance:none}
@@ -197,6 +199,11 @@ footer{display:flex; align-items:center; justify-content:space-between; gap:12px
   let skew = 0;          // this clock minus siboot's
   let lastHeard = Date.now();
   let heard = false, ended = false;
+  // siboot-mod: remembered choices (works when the page keeps storage).
+  const store = {
+    get(k) { try { return localStorage.getItem("siboot." + k); } catch (_) { return null; } },
+    set(k, v) { try { localStorage.setItem("siboot." + k, v); } catch (_) {} },
+  };
   let asking = null;     // the question on screen
   let bar = null;        // the progress bar's label and start
   const links = [];
@@ -462,6 +469,142 @@ footer{display:flex; align-items:center; justify-content:space-between; gap:12px
       };
       actions.append(button("Continue", "primary", "submit"));
       actions.append(button("Cancel", "quiet", "button", () => send({ cancel: true })));
+    } else if (e.kind === "data") {
+      // siboot-mod: asked under the Check step only when there is no Wi-Fi.
+      // Mobile-data mode switches mobile data off with two Shortcuts, by name.
+      askEl.append(make("p", "ready-note", "No Wi-Fi: siboot will switch mobile data off for pairing and installation, using two Shortcuts named TurnOffData and TurnOnData."));
+      const shortcuts = make("div", "field");
+      const shortcutRow = make("div", "actions");
+      for (const [label, url] of [
+        ["Install TurnOffData", "https://www.icloud.com/shortcuts/a536069779964b5bbf384f445b397172"],
+        ["Install TurnOnData", "https://www.icloud.com/shortcuts/65c854e3ecdc4245ac0e15f1433bb141"],
+      ]) {
+        const a = make("a", "button secondary", label);
+        a.href = url;
+        shortcutRow.append(a);
+      }
+      shortcuts.append(shortcutRow);
+      askEl.append(shortcuts);
+      const links = button("Show Shortcut links", "quiet", "button", () => { store.set("shortcuts", "0"); show(); });
+      askEl.append(links);
+      const show = () => {
+        const have = store.get("shortcuts") === "1";
+        shortcuts.style.display = have ? "none" : "";
+        links.style.display = have ? "" : "none";
+      };
+      show();
+      actions.append(button("Continue", "primary", "button", () => {
+        store.set("shortcuts", "1");
+        send({ data_off: true });
+      }));
+      actions.append(button("Cancel", "quiet", "button", () => send({ cancel: true })));
+    } else if (e.kind === "ipa") {
+      // siboot-mod: one source picker, one field, one button. The answers sent
+      // to the server are unchanged: default / uploaded / source, plus data_off.
+      const pick = make("label", "field");
+      pick.append(make("span", "field-label", "What to install"));
+      const mode = make("select", "input");
+      for (const [value, label] of [
+        ["default", "SideInstaller (latest release)"],
+        ["lc", "LiveContainer+SideStore (stable)"],
+        ["lcn", "LiveContainer+SideStore (nightly)"],
+        ["file", "IPA from Files"],
+        ["path", "IPA path in Minis"],
+        ["url", "IPA from direct URL"],
+      ]) {
+        const o = make("option", "", label);
+        o.value = value;
+        mode.append(o);
+      }
+      pick.append(mode);
+      askEl.append(pick);
+
+      const fileField = make("label", "field");
+      fileField.append(make("span", "field-label", "Choose from Files"));
+      const file = make("input", "input");
+      file.type = "file";
+      file.accept = ".ipa,application/octet-stream";
+      fileField.append(file);
+
+      const pathField = make("label", "field");
+      pathField.append(make("span", "field-label", "Path in Minis"));
+      const pathInput = make("input", "input");
+      pathInput.type = "text";
+      pathInput.autocomplete = "off";
+      pathInput.autocapitalize = "off";
+      pathInput.placeholder = "/root/AppsManager_iOS27.ipa";
+      pathField.append(pathInput);
+
+      const urlField = make("label", "field");
+      urlField.append(make("span", "field-label", "Direct IPA URL"));
+      const urlInput = make("input", "input");
+      urlInput.type = "url";
+      urlInput.autocomplete = "url";
+      urlInput.autocapitalize = "off";
+      urlInput.placeholder = "https://example.com/app.ipa";
+      urlField.append(urlInput);
+
+      const fields = { file: fileField, path: pathField, url: urlField };
+      for (const k in fields) askEl.append(fields[k]);
+
+      // Remember the last choice.
+      if (["default", "lc", "lcn", "file", "path", "url"].includes(store.get("mode"))) mode.value = store.get("mode");
+      pathInput.value = store.get("path") || "";
+      urlInput.value = store.get("url") || "";
+
+      const show = () => {
+        for (const k in fields) fields[k].style.display = mode.value === k ? "" : "none";
+      };
+      mode.addEventListener("change", show);
+      show();
+
+      actions.append(button("Install", "primary", "button", async () => {
+        const m = mode.value;
+        store.set("mode", m);
+        store.set("path", pathInput.value.trim());
+        store.set("url", urlInput.value.trim());
+        if (m === "default") return send({ default: true });
+        const presets = {
+          lc: "https://github.com/LiveContainer/LiveContainer/releases/latest/download/LiveContainer+SideStore.ipa",
+          lcn: "https://github.com/LiveContainer/LiveContainer/releases/download/nightly/LiveContainer+SideStore.ipa",
+        };
+        if (presets[m]) return send({ source: presets[m] });
+        if (m === "path" || m === "url") {
+          const field = m === "path" ? pathInput : urlInput;
+          if (!field.value.trim()) return field.focus();
+          return send({ source: field.value.trim() });
+        }
+        const selected = file.files && file.files[0];
+        if (!selected) return file.click();
+        if (!selected.name.toLowerCase().endsWith(".ipa")) {
+          banner("Choose a file with the .ipa extension.", "warn");
+          return;
+        }
+        const id = asking.id;
+        busy(true);
+        try {
+          const chunkSize = 512 * 1024;
+          for (let offset = 0; offset < selected.size; offset += chunkSize) {
+            const reply = await fetch("upload", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/octet-stream",
+                "X-Upload-Id": String(id),
+                "X-Upload-Offset": String(offset),
+              },
+              body: selected.slice(offset, Math.min(offset + chunkSize, selected.size)),
+              cache: "no-store",
+            });
+            if (!reply.ok) throw new Error("Upload failed: " + reply.status);
+          }
+          busy(false);
+          await send({ uploaded: true });
+        } catch (err) {
+          busy(false);
+          banner("Couldn't upload the IPA. Check the connection and try again.", "warn");
+        }
+      }));
+      actions.append(button("Cancel", "quiet", "button", () => send({ cancel: true })));
     } else if (e.kind === "code") {
       const code = make("label", "code");
       const boxes = make("span", "boxes");
@@ -507,6 +650,19 @@ footer{display:flex; align-items:center; justify-content:space-between; gap:12px
         askEl.append(notes);
       }
       actions.append(button(e.button || "Start", "primary", "button", () => send({ go: true })));
+      actions.append(button("Cancel", "quiet", "button", () => send({ cancel: true })));
+    } else if (e.kind === "vpn") {
+      askEl.append(make("p", "ready-note", "siboot needs LocalDevVPN. Tap the button: it turns on and brings you back here."));
+      const link = make("a", "button primary", "Turn on LocalDevVPN");
+      link.href = e.url;
+      const back = () => {
+        if (document.visibilityState !== "visible") return;
+        document.removeEventListener("visibilitychange", back);
+        if (asking === e) send({ go: true });
+      };
+      link.addEventListener("click", () => document.addEventListener("visibilitychange", back));
+      actions.append(link);
+      actions.append(button("Continue", "secondary", "button", () => send({ go: true })));
       actions.append(button("Cancel", "quiet", "button", () => send({ cancel: true })));
     } else if (e.kind === "confirm") {
       actions.append(button("Yes", e.default ? "primary" : "secondary", "button", () => send({ yes: true })));

@@ -26,8 +26,8 @@
 
 mod account;
 mod bridge;
+mod cellular;
 mod devmode;
-mod download;
 mod fail;
 #[cfg(test)]
 mod fake_iphone;
@@ -42,6 +42,7 @@ mod sign;
 mod team;
 mod tunnel;
 mod ui;
+mod vpn;
 mod web;
 
 // rust-core's saved-session sign-in, compiled here unchanged so siboot signs in
@@ -108,6 +109,8 @@ pub struct Args {
     pub apple_id: Option<String>,
     pub ipa: Option<String>,
     pub anisette: Option<String>,
+    /// Temporarily turn mobile data off around local pairing and installation.
+    pub data_off: bool,
 }
 
 impl Args {
@@ -142,6 +145,7 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> std::result::Result<Par
         apple_id: None,
         ipa: None,
         anisette: None,
+        data_off: false,
     };
     let mut argv = argv.into_iter();
     let mut command_seen = false;
@@ -171,6 +175,7 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> std::result::Result<Par
             "--apple-id" => args.apple_id = Some(value("--apple-id")?),
             "--ipa" => args.ipa = Some(value("--ipa")?),
             "--anisette" => args.anisette = Some(value("--anisette")?),
+            "--data-off" => args.data_off = true,
             "--turn-on" => args.turn_on = true,
             "check" | "connect" | "developer-mode" if !command_seen => {
                 command_seen = true;
@@ -239,6 +244,9 @@ Open Minis, with your own Apple Account.
       latest release.
   {anisette}
       Sign in through this anisette server only.
+  {data_off}
+      Temporarily turn mobile data off for local pairing and installation.
+      Internet checks, Apple sign-in and signing happen with data on.
   {turn_on}
       With developer-mode: turn it on, not only
       show it.
@@ -270,7 +278,7 @@ Open Minis, with your own Apple Account.
       Show this message.
 
 {needs}
-  iOS 27 or later, Developer Mode on, Wi-Fi,
+  iOS 27 or later, Developer Mode on,
   LocalDevVPN (App Store) connected, and
   Open Minis 1.16 or later: siboot stops in
   an older one.",
@@ -285,6 +293,7 @@ Open Minis, with your own Apple Account.
         apple_id = flag("--apple-id EMAIL"),
         ipa = flag("--ipa PATH|URL"),
         anisette = flag("--anisette URL"),
+        data_off = flag("--data-off"),
         turn_on = flag("--turn-on"),
         device_ip = flag("--device-ip IP"),
         port = flag("--port N"),
@@ -488,17 +497,55 @@ async fn pipeline(args: &Args) -> Result<()> {
     // tunnel.
     let note = |f: Fail| if devmode { devmode::unreachable_note(f) } else { f };
 
+    // siboot-mod: the forms sit under the step they belong to. Step 1 holds
+    // the LocalDevVPN form and the mobile-data choice; the IPA choice comes
+    // under step 5 (Sign).
     if devmode {
         ui::step(1, "Checking LocalDevVPN and this iPhone");
     } else {
-        ui::step(1, "Checking the internet, LocalDevVPN and this iPhone");
+        ui::step(1, "Checking LocalDevVPN, this iPhone and the internet");
     }
-    let checked = preflight::run(args).await.map_err(note)?;
-    ui::done(&match &checked.ipa {
-        Some(ipa) if args.command == Command::All => format!("{} · the iPhone answers", ipa.name()),
-        _ if checked.online => "online, and the iPhone answers".into(),
-        _ => "the iPhone answers".into(),
-    });
+    // With the web page, offer to turn LocalDevVPN on and wait for it, rather
+    // than failing in step 1.
+    if let Some(page) = web::page() {
+        while !vpn::is_up(args.device).await {
+            if !page.vpn(vpn::ENABLE_URL) {
+                return Err(Fail::by_user("LocalDevVPN was not turned on."));
+            }
+            vpn::wait_up(args.device, 8).await;
+        }
+    }
+    // Without Wi-Fi the install runs over mobile data: turn it off for pairing
+    // (needs the TurnOffData / TurnOnData Shortcuts). On Wi-Fi nothing is asked.
+    let mut data_off = args.data_off;
+    if args.command == Command::All && !vpn::wifi_up() {
+        if let Some(page) = web::page() {
+            match page.data_mode() {
+                Some(_) => data_off = true,
+                None => return Err(Fail::by_user("Mobile-data mode was cancelled.")),
+            }
+        }
+    }
+
+    // Internet checks must run before mobile data is switched off. SideBot's
+    // mobile workflow disables data for the local pairing channel, then turns
+    // it back on before Apple sign-in and signing.
+    // The IPA is chosen later (step 5), so don't require GitHub for SideInstaller
+    // here: a non-http placeholder makes the check skip it.
+    let check_args = if args.command == Command::All && args.ipa.is_none() && web::page().is_some() {
+        Args { ipa: Some(String::from("(chosen later)")), ..args.clone() }
+    } else {
+        args.clone()
+    };
+    let online = preflight::check_environment(&check_args).await.map_err(note)?;
+    let pairing_data = cellular::DataOff::start(data_off).await;
+    if data_off
+        && !cellular::wait_for(args.device, std::time::Duration::from_secs(6)).await
+    {
+        ui::detail("the pairing port did not answer during the mobile-data switch; trying the normal discovery");
+    }
+    let checked = preflight::reach_device(args, online).await.map_err(note)?;
+    ui::done(if checked.online { "online, and the iPhone answers" } else { "the iPhone answers" });
     if args.command == Command::Check {
         ui::finish("Ready", &["Run siboot to install SideInstaller."]);
         return Ok(());
@@ -509,8 +556,6 @@ async fn pipeline(args: &Args) -> Result<()> {
         device: checked.device,
         ..args.clone()
     };
-    // Got in step 1, before LocalDevVPN had to be the VPN that's on.
-    let ipa = checked.ipa;
 
     ui::step(2, "Pairing this iPhone with siboot");
     let pairing_path = args.pairing_path();
@@ -531,13 +576,18 @@ async fn pipeline(args: &Args) -> Result<()> {
     ui::detail(&format!("UDID {}", device.udid));
     ui::done(&format!("{} · iOS {}", device.name, device.ios_version));
     if args.command == Command::Connect {
+        drop(pairing_data);
         ui::finish("The tunnel works", &["This iPhone accepts the pairing file, and the tunnel opens with it."]);
         return Ok(());
     }
     if devmode {
+        drop(pairing_data);
         ui::step(4, "Asking this iPhone for Developer Mode");
         return developer_mode(args, &mut connection).await;
     }
+    // Restore mobile data before Apple sign-in and signing. The guard also
+    // restores it on every earlier error/return.
+    drop(pairing_data);
     // The connection is closed here: iOS drops an idle tunnel during sign-in and
     // signing anyway, so a fresh one is opened to install (as Side by Side does).
     drop(connection);
@@ -546,26 +596,82 @@ async fn pipeline(args: &Args) -> Result<()> {
     let mut session = account::sign_in(args).await?;
     ui::done(&session.team);
 
-    ui::step(5, "Signing SideInstaller for this iPhone");
-    let ipa = ipa.ok_or_else(|| Fail::new("siboot has no IPA to sign.", "step 1 got none"))?;
-    let signed = sign::sign(&mut session, &ipa.path, &device).await?;
+    ui::step(5, "Signing the selected app for this iPhone");
+    // siboot-mod: the IPA choice is asked here, under the Sign step.
+    let ipa_source = if args.command == Command::All && args.ipa.is_none() {
+        match web::page().map(web::Server::choose_ipa) {
+            Some(Some((web::IpaChoice::Source(source), _))) => Some(source),
+            Some(Some((web::IpaChoice::SideInstaller, _))) => None,
+            Some(None) => return Err(Fail::by_user("IPA selection was cancelled.")),
+            None => None,
+        }
+    } else {
+        args.ipa.clone()
+    };
+    let signing_args = Args {
+        ipa: ipa_source,
+        ..args.clone()
+    };
+    let ipa = sign::fetch_ipa(&signing_args).await?;
+    let signed = sign::sign(&mut session, &ipa, &device).await?;
     ui::done(&match &signed.version {
         Some(version) => format!("{} {version} signed", signed.name),
         None => format!("{} signed", signed.name),
     });
 
     ui::step(6, "Installing it");
+    let install_data = cellular::DataOff::start(data_off).await;
+    if data_off
+        && !cellular::wait_for(args.device, std::time::Duration::from_secs(6)).await
+    {
+        ui::detail("the pairing port did not answer during the mobile-data switch; trying the install tunnel");
+    }
     let mut connection = tunnel::open(args.device, &pairing_path).await?;
     let uploaded = install::install(&mut connection, &signed.app_dir).await?;
     ui::ok(&format!("{} installed ({})", signed.name, signed.bundle_id));
     ui::done(&format!("installed · {uploaded}"));
 
+    // siboot-mod: LiveContainer + SideStore gets the pairing in its own place.
+    let live_container = signed.name == "LiveContainer"
+        || signed.bundle_id.to_lowercase().contains("livecontainer");
+    if live_container {
+        ui::step(7, "Handing LiveContainer the pairing");
+        match seed::hand_over_livecontainer(&mut connection, &signed.bundle_id, &pairing_path).await {
+            Ok(()) => ui::done("LiveContainer's SideStore has the pairing"),
+            Err(e) => {
+                ui::warn(
+                    "Couldn't hand LiveContainer the pairing. Import it in SideStore instead: \
+                     it's at ~/.siboot/rp_pairing_file.plist in Minis.",
+                );
+                ui::detail(&e.raw);
+                ui::done("installed, pairing not handed over");
+            }
+        }
+        drop(install_data);
+        ui::link("Open LiveContainer", "livecontainer://");
+        ui::link("Turn off LocalDevVPN", vpn::DISABLE_URL);
+        ui::finish(
+            "LiveContainer is installed",
+            &[
+                "Open it from your Home Screen. The first time, iOS asks you to trust your Apple \
+                 Account: Settings › General › VPN & Device Management. Then open SideStore (top-left \
+                 corner in LiveContainer), connect LocalDevVPN, tap Refresh All, and import SideStore's \
+                 certificate in LiveContainer's settings.",
+                team::lasts(session.kind, session.first),
+            ],
+        );
+        return Ok(());
+    }
+
     ui::step(7, "Handing SideInstaller the pairing");
     seed::hand_over(&mut connection, &signed.bundle_id, &pairing_path).await?;
     ui::done("SideInstaller has the pairing");
+    drop(install_data);
 
     // Its own URL scheme (ios-app/Info.plist): the page's button opens it.
     ui::link("Open SideInstaller", "sideinstaller://");
+    // siboot-mod: the VPN isn't needed once the install is done.
+    ui::link("Turn off LocalDevVPN", vpn::DISABLE_URL);
     ui::finish(
         "SideInstaller is installed",
         &[

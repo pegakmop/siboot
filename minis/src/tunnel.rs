@@ -209,13 +209,13 @@ async fn pair_verified(
         Ok(Ok(s)) => s,
         Ok(Err(e)) => return Err(Fail::new(
             format!(
-                "Couldn't reach this iPhone at {addr}. Connect LocalDevVPN, and check Wi-Fi is on."
+                "Couldn't reach this iPhone at {addr}. Connect LocalDevVPN and check that its local connection is active."
             ),
             e.to_string(),
         )),
         Err(_) => {
             return Err(Fail::new(
-                format!("Nothing answered at {addr}. Connect LocalDevVPN, and check Wi-Fi is on."),
+                format!("Nothing answered at {addr}. Connect LocalDevVPN and check that its local connection is active."),
                 "connect timed out",
             ))
         }

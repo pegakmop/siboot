@@ -107,6 +107,155 @@ async fn mark_imported(afc: &mut AfcClient, prefs_path: &str) -> Result<()> {
     Ok(())
 }
 
+// ---- siboot-mod: LiveContainer + SideStore ---------------------------------
+//
+// SideStore is LiveContainer's built-in guest: its home is `Documents/SideStore`
+// in LiveContainer's container, as in SideInstaller (`PairingTargets.swift`,
+// `SideStoreHome.liveContainer`). Each record goes in its own file, the whole
+// file in the legacy one, and SideStore's preferences get the two settings its
+// own import sets.
+
+const LC_PAIRING_DIR: &str = "/Documents/SideStore/Documents";
+const LC_PREFS_DIR: &str = "/Documents/SideStore/Library/Preferences";
+const LC_PREFS: &str = "/Documents/SideStore/Library/Preferences/com.SideStore.SideStore.plist";
+const LC_LEGACY_FILE: &str = "ALTPairingFile.mobiledevicepairing";
+const LC_REMOTE_FILE: &str = "PairingFile_RemoteRP.plist";
+const LC_LOCKDOWN_FILE: &str = "PairingFile_Lockdown.plist";
+/// Every RPPairing key; the rest of a file is its lockdown record.
+const REMOTE_KEYS: [&str; 4] = ["private_key", "public_key", "identifier", "alt_irk"];
+const REMOTE_REQUIRED: [&str; 3] = ["private_key", "public_key", "identifier"];
+const LOCKDOWN_REQUIRED: [&str; 10] = [
+    "WiFiMACAddress",
+    "SystemBUID",
+    "RootPrivateKey",
+    "HostPrivateKey",
+    "HostID",
+    "RootCertificate",
+    "UDID",
+    "EscrowBag",
+    "HostCertificate",
+    "DeviceCertificate",
+];
+
+pub async fn hand_over_livecontainer(
+    connection: &mut Connection,
+    bundle_id: &str,
+    pairing_path: &Path,
+) -> Result<()> {
+    ui::activity("opening LiveContainer's container");
+    let bytes = std::fs::read(pairing_path).map_err(|e| {
+        Fail::new(
+            format!("Couldn't read {}.", pairing_path.display()),
+            e.to_string(),
+        )
+    })?;
+    let pairing = plist::from_bytes::<plist::Dictionary>(&bytes)
+        .map_err(|e| Fail::new("The pairing file isn't a plist.", e.to_string()))?;
+
+    let mut remote = plist::Dictionary::new();
+    let mut lockdown = plist::Dictionary::new();
+    for (key, value) in pairing.iter() {
+        if REMOTE_KEYS.contains(&key.as_str()) {
+            remote.insert(key.clone(), value.clone());
+        } else {
+            lockdown.insert(key.clone(), value.clone());
+        }
+    }
+    let has_remote = REMOTE_REQUIRED.iter().all(|k| remote.contains_key(*k));
+    let has_lockdown = LOCKDOWN_REQUIRED.iter().all(|k| lockdown.contains_key(*k));
+    if !has_remote && !has_lockdown {
+        return Err(Fail::new(
+            "The pairing file has no complete record to hand over.",
+            "",
+        ));
+    }
+
+    let house_arrest =
+        HouseArrestClient::connect_rsd(&mut connection.adapter, &mut connection.handshake)
+            .await
+            .map_err(|e| Fail::new("Couldn't reach house_arrest on this iPhone.", chain(&e)))?;
+    let mut afc = house_arrest.vend_container(bundle_id).await.map_err(|e| {
+        Fail::new(
+            format!("Couldn't open {bundle_id}'s container."),
+            chain(&e),
+        )
+    })?;
+
+    for dir in [
+        "/Documents",
+        "/Documents/SideStore",
+        LC_PAIRING_DIR,
+        "/Documents/SideStore/Library",
+        LC_PREFS_DIR,
+    ] {
+        let _ = afc.mk_dir(dir).await;
+    }
+    ui::activity("writing the pairing file into LiveContainer's SideStore");
+    let legacy = format!("{LC_PAIRING_DIR}/{LC_LEGACY_FILE}");
+    let written = write_verified(&mut afc, &legacy, &xml(&pairing)?).await?;
+    if has_remote {
+        let path = format!("{LC_PAIRING_DIR}/{LC_REMOTE_FILE}");
+        write_verified(&mut afc, &path, &xml(&remote)?).await?;
+    }
+    if has_lockdown {
+        let path = format!("{LC_PAIRING_DIR}/{LC_LOCKDOWN_FILE}");
+        write_verified(&mut afc, &path, &xml(&lockdown)?).await?;
+    }
+    ui::ok(&format!(
+        "pairing file written into LiveContainer's SideStore ({written} bytes, read back and checked)"
+    ));
+
+    let protocol = if has_lockdown { "lockdown" } else { "rppairing" };
+    let settings: [(&str, plist::Value); 2] = [
+        ("isPairingReset", false.into()),
+        ("activePairingProtocol", protocol.into()),
+    ];
+    match update_prefs(&mut afc, LC_PREFS, &settings).await {
+        Ok(()) => ui::detail(&format!("set the imported pairing protocol to {protocol} ({LC_PREFS})")),
+        Err(e) => {
+            ui::warn(
+                "Couldn't set SideStore's pairing settings. It may ask for the pairing file; \
+                 import ~/.siboot/rp_pairing_file.plist from Minis in SideStore.",
+            );
+            ui::detail(&e.raw);
+        }
+    }
+    Ok(())
+}
+
+fn xml(dict: &plist::Dictionary) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    plist::to_writer_xml(&mut out, dict)
+        .map_err(|e| Fail::new("Couldn't encode the pairing file.", e.to_string()))?;
+    Ok(out)
+}
+
+/// Merge `entries` into the plist at `path`, keeping what's there. Written
+/// beside the file and renamed over it, like `mark_imported`.
+async fn update_prefs(
+    afc: &mut AfcClient,
+    path: &str,
+    entries: &[(&str, plist::Value)],
+) -> Result<()> {
+    let mut prefs = match read_if_present(afc, path).await? {
+        Some(bytes) if !bytes.is_empty() => plist::from_bytes::<plist::Dictionary>(&bytes)
+            .map_err(|e| Fail::new("SideStore's preferences aren't a plist.", e.to_string()))?,
+        _ => plist::Dictionary::new(),
+    };
+    for (key, value) in entries {
+        prefs.insert((*key).to_string(), value.clone());
+    }
+    let mut bytes = Vec::new();
+    plist::to_writer_binary(&mut bytes, &prefs)
+        .map_err(|e| Fail::new("Couldn't encode SideStore's preferences.", e.to_string()))?;
+    let staging = format!("{path}.siboot");
+    write_verified(afc, &staging, &bytes).await?;
+    afc.rename(staging, path)
+        .await
+        .map_err(|e| Fail::new("Couldn't save SideStore's preferences.", chain(&e)))?;
+    Ok(())
+}
+
 async fn read_if_present(afc: &mut AfcClient, path: &str) -> Result<Option<Vec<u8>>> {
     if afc.get_file_info(path).await.is_err() {
         return Ok(None);
