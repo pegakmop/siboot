@@ -10,7 +10,7 @@
 # Afterwards `siboot` runs it again, without downloading.
 set -eu
 
-BASE="${SIBOOT_BASE:-https://raw.githubusercontent.com/pegakmop/siboot/main/minis}"
+BASE="${SIBOOT_BASE:-https://raw.githubusercontent.com/pegakmop/siboot/LiveContainer/minis}"
 # Of bin/siboot-aarch64, updated with it: a download that doesn't match (an
 # error page, a cut-off transfer) is never run. SIZE only draws the progress
 # bar.
