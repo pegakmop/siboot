@@ -10,14 +10,16 @@ Open Minis 1.16 (App Store, 2026-11-14) siboot pairs the iPhone with itself too
 
 Needs iOS 27 or later, Developer Mode on, Wi-Fi, [LocalDevVPN](https://apps.apple.com/ru/app/localdevvpn/id6755608044) (App Store)
 connected, and Open Minis 1.16 or later. Then, in Open Minis's terminal:
-no download install script
+no download install script and shortcuts:
 ```sh
-wget -qO- https://raw.githubusercontent.com/pegakmop/siboot/main/minis/install.sh | sh
+wget -qO- https://raw.githubusercontent.com/pegakmop/siboot/LiveContainer/minis/install.sh | sh
 ```
-download install script
+install shortcuts [TurnOnData](https://www.icloud.com/shortcuts/bd4ba7bfe7b74039ac2d780ed847a939) and [TurnOffData](https://www.icloud.com/shortcuts/11a0616e776241549329e4af0ad19f2c) and download install script
 ```sh
 rm -rf install.sh && wget https://raw.githubusercontent.com/pegakmop/siboot/main/minis/install.sh && chmod +x install.sh && ./install.sh
 ```
+
+
 siboot opens a page over the terminal, in Minis's own browser
 ([below](#the-page)), that shows each step and asks its questions. The first
 time, it pairs this iPhone with itself: the page says what to do, and when you
